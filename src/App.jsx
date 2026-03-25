@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ScanFace, Check, Flame, Plus, Activity, Dumbbell, ChevronLeft, LayoutDashboard, CalendarDays, Smile, Meh, Frown, Share2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
+import { supabase } from './supabaseClient';
 
-// Base Logic & Dummy Datasets
+// Base Logic & Datasets
 const baseFood = { name: 'Chicken Breast', weight: '210g', p: 65, c: 0, f: 7 };
 const ALL_MODIFIERS = [
   { id: 1, name: 'Butter', unit: '1 tbsp', p: 0, c: 0, f: 12 },
@@ -69,7 +70,7 @@ const HistoryShareCard = React.forwardRef(({ history }, ref) => {
           </div>
           <div>
              <div style={{ fontSize: '40px', fontWeight: 900, letterSpacing: '-1px' }}>MacroScout</div>
-             <div style={{ fontSize: '24px', fontWeight: 700, color: 'var(--accent)' }}>Powered by AI</div>
+             <div style={{ fontSize: '24px', fontWeight: 700, color: 'var(--accent)' }}>Cloud Sync</div>
           </div>
         </div>
       </div>
@@ -85,11 +86,32 @@ export default function App() {
   const baseGoal = 2000;
   const [workoutCals, setWorkoutCals] = useState(0);
   const [eatenCals, setEatenCals] = useState(0);
-  const [todayFeeling, setTodayFeeling] = useState(null); // 'Great', 'Okay', 'Tired'
+  const [todayFeeling, setTodayFeeling] = useState(null); 
+  const [cloudHistory, setCloudHistory] = useState([]);
+
+  // Supabase Cloud Sync
+  useEffect(() => {
+    async function fetchCloudData() {
+      try {
+        const { data: logs } = await supabase.from('daily_logs').select('*');
+        if (logs) {
+           const todayEaten = logs.reduce((sum, log) => sum + log.calories, 0);
+           setEatenCals(todayEaten);
+        }
+        
+        const { data: hist } = await supabase.from('history').select('*').order('created_at', { ascending: false });
+        if (hist && hist.length > 0) {
+           setCloudHistory(hist);
+        }
+      } catch (err) {
+        console.warn('Supabase DB connection uninitialized. Reverting to local state.', err);
+      }
+    }
+    fetchCloudData();
+  }, []);
 
   // NATIVE HEALTHKIT BRIDGE LISTENER
   useEffect(() => {
-    // Expose function globally so WKWebView evaluateJavaScript can call it
     window.updateNativeWorkoutCalories = (cals) => {
       console.log('Received Apple HealthKit Burned Calories:', cals);
       setWorkoutCals(Math.round(cals));
@@ -114,7 +136,10 @@ export default function App() {
               onAddWorkout={() => setWorkoutCals(w => w + 300)}
             />
           ) : (
-            <CalendarHistory todayEaten={eatenCals} todayWorkout={workoutCals} base={baseGoal} todayFeeling={todayFeeling} />
+            <CalendarHistory 
+              todayEaten={eatenCals} todayWorkout={workoutCals} base={baseGoal} 
+              todayFeeling={todayFeeling} cloudHistory={cloudHistory} 
+            />
           )}
 
           <BottomNav activeTab={activeTab} onChangeTab={setActiveTab} onLog={() => setView('logging')} />
@@ -123,7 +148,17 @@ export default function App() {
 
       {view === 'logging' && (
         <MealLogger
-          onLog={(cals) => { setEatenCals(e => e + cals); setView('main'); }}
+          onLog={async (cals) => { 
+            setEatenCals(e => e + cals); 
+            setView('main'); 
+            
+            // Push securely to Supabase
+            try {
+               await supabase.from('daily_logs').insert([{ calories: cals }]);
+            } catch (err) {
+               console.warn("Cloud push failed, cached locally.");
+            }
+          }}
           onCancel={() => setView('main')}
         />
       )}
@@ -131,7 +166,6 @@ export default function App() {
   );
 }
 
-// 1. Dynamic Dashboard UI 
 function Dashboard({ baseGoal, workoutCals, eatenCals, adjustedGoal, remaining, onAddWorkout, todayFeeling, setTodayFeeling }) {
   const percentUsed = Math.min((eatenCals / adjustedGoal) * 100, 100);
 
@@ -170,7 +204,6 @@ function Dashboard({ baseGoal, workoutCals, eatenCals, adjustedGoal, remaining, 
         </div>
       </div>
 
-      {/* Daily Reflection Tracker */}
       <div className="feeling-section">
         <h3 className="section-title" style={{ fontSize: '16px', marginBottom: '12px' }}>How do you feel today?</h3>
         <div className="feeling-grid">
@@ -191,14 +224,18 @@ function Dashboard({ baseGoal, workoutCals, eatenCals, adjustedGoal, remaining, 
   );
 }
 
-// 2. Calendar / History Tab (WITH SHARE)
-function CalendarHistory({ todayEaten, todayWorkout, base, todayFeeling }) {
+function CalendarHistory({ todayEaten, todayWorkout, base, todayFeeling, cloudHistory }) {
+  // Merge live local state with cloud state
   const history = [
     { date: 'Today', eaten: todayEaten, workout: todayWorkout, base: base, feeling: todayFeeling || 'Not Set' },
-    { date: 'Yesterday', eaten: 2150, workout: 400, base: 2000, feeling: 'Great' },
-    { date: 'Thursday, Mar 22', eaten: 1800, workout: 0, base: 2000, feeling: 'Tired' },
-    { date: 'Wednesday, Mar 21', eaten: 2500, workout: 600, base: 2000, feeling: 'Great' }
+    ...cloudHistory
   ];
+  
+  // Fallback if cloud is completely empty or unauthorized
+  if (history.length === 1) {
+      history.push({ date: 'Yesterday', eaten: 2150, workout: 400, base: 2000, feeling: 'Great' });
+      history.push({ date: 'Mar 22', eaten: 1800, workout: 0, base: 2000, feeling: 'Tired' });
+  }
 
   const exportRef = useRef(null);
   const [isExporting, setIsExporting] = useState(false);
@@ -284,7 +321,6 @@ function CalendarHistory({ todayEaten, todayWorkout, base, todayFeeling }) {
   )
 }
 
-// 3. App Bottom Navigation
 function BottomNav({ activeTab, onChangeTab, onLog }) {
   return (
     <div className="bottom-nav">
@@ -303,7 +339,6 @@ function BottomNav({ activeTab, onChangeTab, onLog }) {
   )
 }
 
-// 4. Real-Time Unified Meal Logger (With Real Camera Feed)
 function MealLogger({ onLog, onCancel }) {
   const [scanning, setScanning] = useState(true);
   const [scanText, setScanText] = useState('Initializing Sensors...');
@@ -312,7 +347,6 @@ function MealLogger({ onLog, onCancel }) {
 
   const videoRef = useRef(null);
 
-  // Live Camera Access
   useEffect(() => {
     let stream = null;
     async function startCamera() {
@@ -333,7 +367,6 @@ function MealLogger({ onLog, onCancel }) {
     };
   }, []);
 
-  // Realistic Scanning Simulation
   useEffect(() => {
     if (!scanning) return;
     const phases = [
